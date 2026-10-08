@@ -11,6 +11,7 @@ import aiohttp
 import aiosqlite
 
 import db
+import photos
 from config import setting
 from iiko import access_token, request
 
@@ -146,10 +147,16 @@ async def sync(conn: aiosqlite.Connection) -> dict:
     items = parse_menu(data["menu"])
     tables = parse_tables(data["sections"])
 
+    # Оригиналы из iiko тяжёлые — подменяем на сжатые копии
+    local = await photos.localize({i["image_url"] for i in items if i["image_url"]})
+    for i in items:
+        if i["image_url"] in local:
+            i["image_url"] = local[i["image_url"]]
+
     await conn.executemany(
-            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [("org_id", data["org_id"]), ("terminal_group_id", data["terminal_group_id"])],
-        )
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [("org_id", data["org_id"]), ("terminal_group_id", data["terminal_group_id"])],
+    )
     await conn.executemany(
         """INSERT INTO menu_items (name, price, category, sort, iiko_product_id, sku, description, image_url, modifiers)
            VALUES (:name, :price, :category, :sort, :iiko_product_id, :sku, :description, :image_url, :modifiers)
@@ -174,6 +181,7 @@ async def sync(conn: aiosqlite.Connection) -> dict:
     return {
         "items": len(items),
         "with_photo": sum(1 for i in items if i["image_url"]),
+        "photos_compressed": sum(1 for i in items if (i["image_url"] or "").startswith(photos.URL_PREFIX)),
         "with_modifiers": sum(1 for i in items if i["modifiers"] != "[]"),
         "tables": len(tables),
     }
@@ -185,6 +193,7 @@ async def main() -> None:
         summary = await sync(conn)
         print(
             f"Меню: {summary['items']} позиций (с фото из iiko: {summary['with_photo']}, "
+            f"из них сжато: {summary['photos_compressed']}, "
             f"с модификаторами: {summary['with_modifiers']}), столов: {summary['tables']}"
         )
         async with conn.execute("SELECT name, token FROM tables ORDER BY id") as cur:

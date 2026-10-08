@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aiohttp
 import aiosqlite
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -20,11 +21,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-import aiohttp
-
 import db
 import iiko
 import import_menu
+import photos
 from config import setting
 from qr_sheet import render_sheet
 
@@ -66,7 +66,9 @@ async def menu_sync_loop() -> None:
 
 app = FastAPI(lifespan=lifespan)
 MENU_PHOTOS.mkdir(parents=True, exist_ok=True)
+photos.PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/photos", StaticFiles(directory=photos.PHOTOS_DIR), name="photos")
 
 
 def now() -> str:

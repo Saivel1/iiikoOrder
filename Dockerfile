@@ -23,7 +23,8 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin app \
 USER app
 
 ENV PATH=/opt/venv/bin:$PATH \
-    DB_PATH=/app/data/app.db
+    DB_PATH=/app/data/app.db \
+    PHOTOS_DIR=/app/data/photos
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \

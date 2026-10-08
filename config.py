@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     IIKO_SEND_ORDERS: bool = False  # отправлять заказы гостей на кассу iiko
     MENU_SYNC_MINUTES: int = 15  # как часто подтягивать меню, фото и цены из iiko; 0 — не подтягивать
     DB_PATH: str = "app.db"
+    PHOTOS_DIR: str = "static/photos"  # сжатые фото блюд из iiko
 
 
 

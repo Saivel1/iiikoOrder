@@ -5,8 +5,9 @@ services:
     env_file: .env
     environment:
       DB_PATH: /app/data/app.db
+      PHOTOS_DIR: /app/data/photos # сжатые фото из iiko
     volumes:
-      - ./data:/app/data # база SQLite
+      - ./data:/app/data # база SQLite и сжатые фото
       - ./data/menu:/app/static/menu # свои фото блюд: <артикул>.jpg
     ports:
       # Только localhost: снаружи приложение доступно лишь через nginx.
