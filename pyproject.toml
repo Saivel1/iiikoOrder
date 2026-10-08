@@ -1,0 +1,16 @@
+[project]
+name = "iikoweb"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.14.4",
+    "aiosqlite>=0.22.1",
+    "fastapi>=0.143.0",
+    "jinja2>=3.1.6",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "qrcode[pil]>=8.2",
+    "uvicorn[standard]>=0.54.0",
+]

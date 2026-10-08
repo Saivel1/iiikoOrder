@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Стоп-лист — Брутто</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --primary: #ec1c24; --text: #212121; --muted: #7a7a7a; --bg: #ececec; --card: #ffffff; --line: #e8e8e8; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.35 Montserrat, -apple-system, BlinkMacSystemFont, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--card); box-shadow: 0 1px 0 var(--line); }
+  header .in { max-width: 720px; margin: 0 auto; padding: 14px 16px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .search { margin-top: 10px; width: 100%; font: inherit; padding: 10px 14px; border-radius: 12px; border: 0; background: var(--bg); outline: none; }
+  main { max-width: 720px; margin: 0 auto; padding: 8px 16px 40px; }
+  h3 { margin: 22px 0 8px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+  .list { background: var(--card); border-radius: 16px; overflow: hidden; }
+  label { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  label:last-child { border-bottom: 0; }
+  label .name { flex: 1; min-width: 0; }
+  label .price { color: var(--muted); font-size: 14px; }
+  label.off .name { color: var(--muted); }
+  label.off .state { display: inline; }
+  .state { display: none; color: var(--primary); font-size: 12px; font-weight: 700; margin-left: 6px; }
+
+  /* переключатель */
+  .switch { position: relative; width: 50px; height: 30px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .switch span { position: absolute; inset: 0; background: #c9c9c9; border-radius: 999px; transition: .15s; }
+  .switch span::before { content: ""; position: absolute; width: 24px; height: 24px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .15s; box-shadow: 0 1px 3px rgb(0 0 0 / .25); }
+  .switch input:checked + span { background: #1f9d55; }
+  .switch input:checked + span::before { transform: translateX(20px); }
+  .error { color: var(--primary); padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <div class="in">
+    <h1>Стоп-лист</h1>
+    <div class="sub" id="sub">Выключите позицию — она сразу пропадёт у гостей.</div>
+    <input class="search" id="search" type="search" placeholder="Найти позицию…">
+  </div>
+</header>
+<main id="list"></main>
+
+<script>
+const KEY = {{ key|tojson }};
+const $ = (id) => document.getElementById(id);
+const api = (path, opts = {}) => fetch(path + "?key=" + encodeURIComponent(KEY), {
+  ...opts, headers: { "Content-Type": "application/json" },
+});
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  Object.assign(node, attrs);
+  node.append(...children);
+  return node;
+}
+const rub = (n) => Math.round(n).toLocaleString("ru-RU") + " ₽";
+
+let items = [];
+
+function row(m) {
+  const box = el("input", { type: "checkbox", checked: !!m.is_available });
+  const node = el("label", { className: m.is_available ? "" : "off" },
+    el("span", { className: "name" }, m.name, el("span", { className: "state", textContent: "нет в наличии" })),
+    el("span", { className: "price", textContent: rub(m.price) }),
+    el("span", { className: "switch" }, box, el("span")),
+  );
+  box.onchange = async () => {
+    m.is_available = box.checked;
+    node.classList.toggle("off", !box.checked);
+    renderSub();
+    const res = await api(`/api/bar/menu/${m.id}`, { method: "PATCH", body: JSON.stringify({ is_available: box.checked }) });
+    if (!res.ok) { alert("Не удалось сохранить, попробуйте ещё раз"); load(); }
+  };
+  return node;
+}
+
+function renderSub() {
+  const off = items.filter((m) => !m.is_available).length;
+  $("sub").textContent = off
+    ? `Нет в наличии: ${off} из ${items.length}. Выключенные позиции гости не видят.`
+    : "Всё в наличии. Выключите позицию — она сразу пропадёт у гостей.";
+}
+
+function render() {
+  const q = $("search").value.trim().toLowerCase();
+  const byCat = new Map();
+  for (const m of items) {
+    if (q && !m.name.toLowerCase().includes(q)) continue;
+    if (!byCat.has(m.category)) byCat.set(m.category, []);
+    byCat.get(m.category).push(m);
+  }
+  $("list").replaceChildren(...[...byCat.entries()].flatMap(([cat, list]) => [
+    el("h3", { textContent: cat }),
+    el("div", { className: "list" }, ...list.map(row)),
+  ]));
+  renderSub();
+}
+
+async function load() {
+  try {
+    const res = await api("/api/bar/menu");
+    items = await res.json();
+    render();
+  } catch {
+    $("list").replaceChildren(el("div", { className: "error", textContent: "Нет связи с сервером. Обновите страницу." }));
+  }
+}
+
+$("search").oninput = render;
+load();
+</script>
+</body>
+</html>
