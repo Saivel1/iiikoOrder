@@ -37,6 +37,9 @@ LOGIN_USER=${SUDO_USER:-root}
 step() { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!!! %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mxxx %s\033[0m\n' "$*" >&2; exit 1; }
+# Никаких молчаливых выходов: при любой ошибке показываем строку и команду
+set -E
+trap 'printf "\033[1;31mxxx Ошибка в строке %s: %s\033[0m\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 [ "$(id -u)" -eq 0 ] || die "Нужен root: sudo $0 $DOMAIN $EMAIL"
 [ -f "$SRC/docker-compose.yml" ] || die "Запускайте скрипт из папки проекта ($SRC — не она)"
@@ -108,6 +111,8 @@ systemctl enable --now docker
 
 step "SSH: ключ и вход только по ключу"
 LOGIN_HOME=$(getent passwd "$LOGIN_USER" | cut -d: -f6)
+# На Ubuntu с ssh.socket этой папки нет, пока никто не подключился, и `sshd -t/-T` без неё падает
+mkdir -p /run/sshd && chmod 755 /run/sshd
 AUTH_KEYS=$LOGIN_HOME/.ssh/authorized_keys
 if [ -n "$SSH_KEY" ]; then
     [ -f "$SSH_KEY" ] && SSH_KEY=$(cat "$SSH_KEY")
@@ -145,8 +150,9 @@ fi
 # ---------- файрвол ----------
 
 step "Файрвол: снаружи только SSH, 80 и 443"
-SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+SSH_PORT=$( (sshd -T 2>/dev/null || true) | awk '/^port /{print $2; exit}')
 SSH_PORT=${SSH_PORT:-22}
+echo "Порт SSH: $SSH_PORT"
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow "$SSH_PORT/tcp" comment 'SSH'
