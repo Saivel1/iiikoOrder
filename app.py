@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -19,11 +20,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import aiohttp
+
 import db
 import iiko
+import import_menu
 from config import setting
+from qr_sheet import render_sheet
+
+log = logging.getLogger("uvicorn.error")
 
 RATE_LIMIT_SECONDS = 10
+KASSA_CHECK_SECONDS = 30
+PROBLEMS_HOURS = 12
 MENU_PHOTOS = Path("static/menu")
 PHOTO_EXTS = (".webp", ".jpg", ".jpeg", ".png")
 
@@ -37,8 +46,22 @@ templates = Jinja2Templates(directory="templates")
 async def lifespan(_: FastAPI):
     global conn
     conn = await db.connect()
+    sync_task = asyncio.create_task(menu_sync_loop()) if setting.MENU_SYNC_MINUTES > 0 else None
     yield
+    if sync_task:
+        sync_task.cancel()
     await conn.close()
+
+
+async def menu_sync_loop() -> None:
+    """Подтягивает меню, фото, модификаторы и столы из iiko — сразу при старте и потом по расписанию."""
+    while True:
+        try:
+            summary = await import_menu.sync(conn)
+            log.info("Меню синхронизировано с iiko: %s", summary)
+        except Exception:  # iiko недоступен — работаем на том, что уже есть в базе
+            log.exception("Не удалось синхронизировать меню с iiko")
+        await asyncio.sleep(setting.MENU_SYNC_MINUTES * 60)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -95,7 +118,7 @@ async def menu():
     photos = local_photos()
     async with conn.execute(
         """SELECT id, name, price, category, description, sku, image_url, modifiers
-           FROM menu_items WHERE is_available = 1 ORDER BY sort"""
+           FROM menu_items WHERE is_available = 1 AND in_menu = 1 ORDER BY sort"""
     ) as cur:
         rows = [dict(r) async for r in cur]
     for r in rows:
@@ -168,7 +191,8 @@ async def create_order(body: OrderIn):
     ids = [i.menu_item_id for i in body.items]
     placeholders = ",".join("?" * len(ids))
     async with conn.execute(
-        f"SELECT id, name, price, modifiers FROM menu_items WHERE is_available = 1 AND id IN ({placeholders})",
+        f"""SELECT id, name, price, modifiers FROM menu_items
+            WHERE is_available = 1 AND in_menu = 1 AND id IN ({placeholders})""",
         ids,
     ) as cur:
         available = {r["id"]: r async for r in cur}
@@ -277,7 +301,7 @@ def start_iiko_send(order_id: int) -> None:
     task.add_done_callback(background_tasks.discard)
 
 
-# ---------- Бариста: стоп-лист ----------
+# ---------- Бариста ----------
 
 
 def bar_auth(key: str = Query(...)) -> None:
@@ -287,12 +311,14 @@ def bar_auth(key: str = Query(...)) -> None:
 
 @app.get("/bar", response_class=HTMLResponse, dependencies=[Depends(bar_auth)])
 async def bar_page(request: Request, key: str):
-    return templates.TemplateResponse(request, "bar.html", {"key": key})
+    return templates.TemplateResponse(request, "bar.html", {"key": key, "iiko_enabled": setting.IIKO_SEND_ORDERS})
 
 
 @app.get("/api/bar/menu", dependencies=[Depends(bar_auth)])
 async def bar_menu():
-    async with conn.execute("SELECT id, name, price, category, is_available FROM menu_items ORDER BY sort") as cur:
+    async with conn.execute(
+        "SELECT id, name, price, category, is_available FROM menu_items WHERE in_menu = 1 ORDER BY sort"
+    ) as cur:
         return [dict(r) async for r in cur]
 
 
@@ -307,3 +333,90 @@ async def set_availability(item_id: int, body: AvailabilityIn):
     if not cur.rowcount:
         raise HTTPException(404, "Позиция не найдена")
     return {"id": item_id, "is_available": body.is_available}
+
+
+# Касса онлайн для облака iiko? Спрашиваем не чаще раза в KASSA_CHECK_SECONDS, сколько бы вкладок ни было открыто
+kassa = {"alive": None, "error": None, "checked": 0.0}
+kassa_lock = asyncio.Lock()
+
+
+async def kassa_status() -> dict:
+    async with kassa_lock:
+        if time.monotonic() - kassa["checked"] > KASSA_CHECK_SECONDS:
+            meta = await db.get_meta(conn)
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                    token = await iiko.access_token(session)
+                    res = await iiko.request(
+                        session,
+                        "/api/1/terminal_groups/is_alive",
+                        {"organizationIds": [meta["org_id"]], "terminalGroupIds": [meta["terminal_group_id"]]},
+                        token,
+                    )
+                kassa.update(alive=res["isAliveStatus"][0]["isAlive"], error=None)
+            except Exception as e:
+                kassa.update(alive=None, error=str(e)[:200])
+            kassa["checked"] = time.monotonic()
+    return {"alive": kassa["alive"], "error": kassa["error"]}
+
+
+@app.get("/api/bar/overview", dependencies=[Depends(bar_auth)])
+async def bar_overview():
+    """Состояние кассы и заказы, которые не дошли до неё — их надо пробить вручную."""
+    since = datetime.fromtimestamp(time.time() - PROBLEMS_HOURS * 3600, timezone.utc).isoformat(timespec="seconds")
+    async with conn.execute(
+        "SELECT id FROM orders WHERE iiko_status = 'error' AND created_at > ? ORDER BY id", (since,)
+    ) as cur:
+        ids = [r["id"] async for r in cur]
+    problems = []
+    for order_id in ids:
+        o = await load_order(order_id)
+        problems.append({k: o[k] for k in ("id", "table_name", "guest_name", "comment", "created_at", "items", "iiko_error")})
+    return {
+        "iiko_enabled": setting.IIKO_SEND_ORDERS,
+        "kassa": await kassa_status() if setting.IIKO_SEND_ORDERS else None,
+        "problems": problems,
+    }
+
+
+async def failed_order(order_id: int) -> dict:
+    order = await load_order(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    if order["iiko_status"] != "error":
+        raise HTTPException(409, "Заказ уже не в ошибке — обновите страницу")
+    return order
+
+
+@app.post("/api/bar/orders/{order_id}/manual", dependencies=[Depends(bar_auth)])
+async def mark_manual(order_id: int):
+    """Бариста пробил заказ на кассе руками — убираем его из проблемных."""
+    await failed_order(order_id)
+    await conn.execute("UPDATE orders SET iiko_status = 'manual', updated_at = ? WHERE id = ?", (now(), order_id))
+    await conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/bar/orders/{order_id}/retry", dependencies=[Depends(bar_auth)])
+async def retry_order(order_id: int):
+    await failed_order(order_id)
+    await conn.execute("UPDATE orders SET iiko_status = 'sending', iiko_error = NULL WHERE id = ?", (order_id,))
+    await conn.commit()
+    start_iiko_send(order_id)
+    return {"ok": True}
+
+
+class QrIn(BaseModel):
+    password: str
+
+
+@app.post("/api/bar/qr", response_class=HTMLResponse, dependencies=[Depends(bar_auth)])
+async def qr_sheet(body: QrIn):
+    if not setting.MASTER_PASSWORD:
+        raise HTTPException(503, "MASTER_PASSWORD не задан в .env на сервере")
+    if not secrets.compare_digest(body.password.encode(), setting.MASTER_PASSWORD.encode()):
+        await asyncio.sleep(1)  # притормаживаем подбор
+        raise HTTPException(403, "Неверный мастер-пароль")
+    async with conn.execute("SELECT name, token FROM tables ORDER BY id") as cur:
+        tables = [dict(r) async for r in cur]
+    return render_sheet(tables, setting.BASE_URL)

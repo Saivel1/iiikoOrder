@@ -78,11 +78,22 @@
   .order .num b { display: block; font-size: 22px; font-weight: 800; color: var(--primary); line-height: 1.1; }
   .order .num small { color: var(--muted); font-size: 11px; white-space: pre-line; display: block; }
 
-  /* ---------- категории ---------- */
-  .cats {
-    position: sticky; top: 0; z-index: 5; background: var(--bg);
-    display: flex; gap: 8px; overflow-x: auto; padding: 12px 16px; margin: 0 -16px; scrollbar-width: none;
+  /* ---------- поиск и категории ---------- */
+  .menubar { position: sticky; top: 0; z-index: 5; background: var(--bg); margin: 0 -16px; padding: 12px 16px 0; }
+  .search { position: relative; }
+  .search input { padding: 12px 44px 12px 42px; background: var(--card); border-radius: 999px; }
+  .search .icon { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+  .search .clear {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 34px; height: 34px;
+    border: 0; border-radius: 50%; background: var(--bg); color: var(--text); font-size: 20px; line-height: 1; cursor: pointer;
   }
+  .search input::-webkit-search-cancel-button { display: none; }
+  .cats {
+    display: flex; gap: 8px; overflow-x: auto; padding: 10px 16px 12px; margin: 0 -16px; scrollbar-width: none;
+  }
+  .found { color: var(--muted); font-size: 14px; margin: 14px 0 0; }
+  .nothing { text-align: center; color: var(--muted); padding: 40px 0; }
+  .nothing .big { font-size: 40px; }
   .cats::-webkit-scrollbar { display: none; }
   .cats a {
     flex: none; padding: 9px 16px; border-radius: 999px; background: var(--card);
@@ -90,7 +101,7 @@
   }
   .cats a.active { background: var(--primary); color: var(--on-primary); }
 
-  section h3 { margin: 18px 0 12px; font-size: 22px; font-weight: 800; scroll-margin-top: 70px; }
+  section h3 { margin: 18px 0 12px; font-size: 22px; font-weight: 800; scroll-margin-top: 130px; }
 
   /* ---------- карточки ---------- */
   .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -214,7 +225,14 @@
 
   <div class="hidden" id="menu-screen">
     <div class="orders" id="orders"></div>
-    <nav class="cats" id="cats"></nav>
+    <div class="menubar">
+      <div class="search">
+        <svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="search" type="search" enterkeyhint="search" autocomplete="off" placeholder="Поиск: латте, чизкейк, миндальное…" aria-label="Поиск по меню">
+        <button class="clear hidden" id="search-clear" aria-label="Очистить поиск">×</button>
+      </div>
+      <nav class="cats" id="cats"></nav>
+    </div>
     <div id="menu"><div class="loading">Загружаем меню…</div></div>
   </div>
 </div>
@@ -258,6 +276,7 @@ const STATUS = {
   sent: "Принят — готовим",
   error: "Не дошёл до кассы — подойдите к бариста",
   off: "Принят",
+  manual: "Принят — пробит на кассе",
 };
 const SHOW_ORDERS_HOURS = 3;
 
@@ -301,7 +320,12 @@ function photo(m) {
 let name = store.get("guest_name", "");
 let menu = [];
 // Строка корзины = блюдо + выбранные модификаторы; одно блюдо с разными добавками — разные строки
-let cart = new Map(); // ключ -> { id, qty, mods: [{ id, amount }] }
+const CART_KEY = "cart:" + TOKEN;
+const CART_TTL_HOURS = 6;
+// Корзина переживает перезагрузку страницы; через несколько часов считаем её забытой
+const savedCart = store.get(CART_KEY, null);
+let cart = new Map(savedCart && Date.now() - savedCart.at < CART_TTL_HOURS * 3600e3 ? savedCart.lines : []); // ключ -> { id, qty, mods: [{ id, amount }] }
+const saveCart = () => store.set(CART_KEY, { at: Date.now(), lines: [...cart] });
 let myOrders = store.get(ORDERS_KEY, []);
 
 // ---------- имя ----------
@@ -360,6 +384,7 @@ async function loadMenu() {
     const item = byId(l.id);
     if (!item || l.mods.some((x) => !modInfo(item, x.id))) cart.delete(key);
   }
+  saveCart();
   renderMenu();
   renderCart();
 }
@@ -413,8 +438,50 @@ function updateCard(id) {
   node.querySelector(".foot").lastChild.replaceWith(controls(item));
 }
 
+// ---------- поиск ----------
+const norm = (t) => t.toLowerCase().replaceAll("ё", "е");
+let query = "";
+
+// Ищем по названию, категории, описанию и модификаторам («миндальное» найдёт кофе, где его можно выбрать)
+function matches(m, words) {
+  const text = norm([m.name, m.category, m.description, ...m.modifiers.flatMap((g) => g.items.map((x) => x.name))].join(" "));
+  return words.every((w) => text.includes(w));
+}
+
+function renderSearch() {
+  const words = norm(query).split(/\s+/).filter(Boolean);
+  // Сначала те, где слово в названии, потом найденные по модификаторам и описанию
+  const inName = (m) => words.every((w) => norm(m.name).includes(w));
+  const found = menu.filter((m) => matches(m, words)).sort((a, b) => inName(b) - inName(a));
+  cards.clear();
+  $("menu").replaceChildren(...(found.length
+    ? [el("p", { className: "found", textContent: `Нашлось: ${found.length}` }), el("div", { className: "grid", style: "margin-top:12px" }, ...found.map(card))]
+    : [el("div", { className: "nothing" }, el("div", { className: "big", textContent: "🔍" }), `Ничего не нашли по «${query}»`)]));
+}
+
+$("search").oninput = () => {
+  query = $("search").value.trim();
+  $("search-clear").classList.toggle("hidden", !query);
+  // Если меню уже пролистано, возвращаемся к началу результатов
+  const top = $("menu-screen").querySelector(".menubar").offsetTop;
+  if (window.scrollY > top) window.scrollTo({ top });
+  renderMenu();
+};
+$("search").onkeydown = (e) => { if (e.key === "Enter") $("search").blur(); };
+$("search-clear").onclick = () => {
+  $("search").value = "";
+  $("search").oninput();
+  $("search").focus();
+};
+
 let observer;
 function renderMenu() {
+  $("cats").classList.toggle("hidden", !!query);
+  if (query) {
+    observer?.disconnect();
+    renderSearch();
+    return;
+  }
   const byCat = new Map();
   for (const m of menu) {
     if (!byCat.has(m.category)) byCat.set(m.category, []);
@@ -444,7 +511,7 @@ function watchCategories() {
       document.querySelectorAll(".cats a").forEach((a) => a.classList.toggle("active", a.dataset.i === i));
       document.querySelector(`.cats a[data-i="${i}"]`)?.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
     }
-  }, { rootMargin: "-80px 0px -70% 0px" });
+  }, { rootMargin: "-140px 0px -60% 0px" });
   document.querySelectorAll("section h3").forEach((h) => observer.observe(h));
 }
 
@@ -452,6 +519,7 @@ function addLine(id, mods, qty) {
   const key = lineKey(id, mods);
   const line = cart.get(key);
   cart.set(key, { id, mods, qty: Math.min(10, (line?.qty || 0) + qty) });
+  saveCart();
   updateCard(id);
   renderCart();
 }
@@ -460,6 +528,7 @@ function setLineQty(key, qty) {
   if (!line) return;
   qty = Math.min(10, qty);
   if (qty > 0) line.qty = qty; else cart.delete(key);
+  saveCart();
   updateCard(line.id);
   renderCart();
 }
@@ -503,7 +572,7 @@ function setAmount(g, x, amount) {
 
 function groupHint(g) {
   if (g.min > 0) return g.max === 1 ? "обязательно, 1 вариант" : `обязательно, от ${g.min} до ${g.max}`;
-  return g.max === 1 ? "по желанию" : `по желанию, до ${g.max}`;
+  return g.max === 1 ? "по желанию, только 1" : `по желанию, до ${g.max}`;
 }
 
 function option(g, x) {
@@ -607,6 +676,7 @@ $("send").onclick = async () => {
     store.set(ORDERS_KEY, myOrders);
     const ordered = new Set([...cart.values()].map((l) => l.id));
     cart.clear();
+    saveCart();
     ordered.forEach(updateCard);
     $("comment").value = "";
     closeCart();

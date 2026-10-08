@@ -1,5 +1,6 @@
-"""Забирает из iiko меню, столы и id кассы в app.db. Можно запускать повторно:
-цены и названия обновятся, стоп-лист и токены столов (QR) сохранятся."""
+"""Забирает из iiko меню, столы и id кассы в базу. Можно запускать повторно:
+цены, фото и модификаторы обновятся, стоп-лист и токены столов (QR) сохранятся.
+Приложение само вызывает sync() раз в MENU_SYNC_MINUTES; вручную — `uv run python import_menu.py`."""
 
 import asyncio
 import json
@@ -7,12 +8,15 @@ import re
 import secrets
 
 import aiohttp
+import aiosqlite
 
 import db
 from config import setting
 from iiko import access_token, request
 
 SKIP_ITEMS = {"Свободный товар"}
+# Эти категории идут в меню первыми, в указанном порядке; остальные — как в iiko
+FIRST_CATEGORIES = ["Классика"]
 # Гости сидят за столом — упаковка «с собой» им не нужна
 SKIP_MODIFIERS = re.compile(r"^с собой", re.I)
 # Технические названия групп из iiko → понятные гостю
@@ -93,7 +97,11 @@ async def fetch() -> dict:
 
 def parse_menu(menu: dict) -> list[dict]:
     items = []
-    for cat in menu["itemCategories"]:
+    categories = sorted(
+        menu["itemCategories"],
+        key=lambda c: FIRST_CATEGORIES.index(c["name"]) if c["name"] in FIRST_CATEGORIES else len(FIRST_CATEGORIES),
+    )
+    for cat in categories:
         if cat.get("isHidden") or not cat.get("name"):
             continue
         for item in cat["items"]:
@@ -132,39 +140,52 @@ def parse_tables(sections: dict) -> list[dict]:
     return tables
 
 
-async def main() -> None:
+async def sync(conn: aiosqlite.Connection) -> dict:
+    """Забирает всё из iiko и записывает в базу. Возвращает сводку для лога."""
     data = await fetch()
     items = parse_menu(data["menu"])
     tables = parse_tables(data["sections"])
 
-    conn = await db.connect()
-    try:
-        await conn.executemany(
+    await conn.executemany(
             "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [("org_id", data["org_id"]), ("terminal_group_id", data["terminal_group_id"])],
         )
-        await conn.executemany(
-            """INSERT INTO menu_items (name, price, category, sort, iiko_product_id, sku, description, image_url, modifiers)
-               VALUES (:name, :price, :category, :sort, :iiko_product_id, :sku, :description, :image_url, :modifiers)
-               ON CONFLICT(iiko_product_id) DO UPDATE SET
-                 name = excluded.name, price = excluded.price,
-                 category = excluded.category, sort = excluded.sort, sku = excluded.sku,
-                 description = excluded.description, image_url = excluded.image_url,
-                 modifiers = excluded.modifiers""",
-            items,
-        )
-        await conn.executemany(
-            """INSERT INTO tables (name, token, iiko_table_id) VALUES (:name, :token, :iiko_table_id)
-               ON CONFLICT(iiko_table_id) DO UPDATE SET name = excluded.name""",
-            [{**t, "token": secrets.token_urlsafe(8)} for t in tables],
-        )
-        await conn.commit()
+    await conn.executemany(
+        """INSERT INTO menu_items (name, price, category, sort, iiko_product_id, sku, description, image_url, modifiers)
+           VALUES (:name, :price, :category, :sort, :iiko_product_id, :sku, :description, :image_url, :modifiers)
+           ON CONFLICT(iiko_product_id) DO UPDATE SET
+             name = excluded.name, price = excluded.price,
+             category = excluded.category, sort = excluded.sort, sku = excluded.sku,
+             description = excluded.description, image_url = excluded.image_url,
+             modifiers = excluded.modifiers, in_menu = 1""",
+        items,
+    )
+    # Позиции, которых больше нет в меню iiko, прячем (стоп-лист бариста при этом не трогаем)
+    ids = [i["iiko_product_id"] for i in items]
+    await conn.execute(
+        f"UPDATE menu_items SET in_menu = 0 WHERE iiko_product_id NOT IN ({','.join('?' * len(ids))})", ids
+    )
+    await conn.executemany(
+        """INSERT INTO tables (name, token, iiko_table_id) VALUES (:name, :token, :iiko_table_id)
+           ON CONFLICT(iiko_table_id) DO UPDATE SET name = excluded.name""",
+        [{**t, "token": secrets.token_urlsafe(8)} for t in tables],
+    )
+    await conn.commit()
+    return {
+        "items": len(items),
+        "with_photo": sum(1 for i in items if i["image_url"]),
+        "with_modifiers": sum(1 for i in items if i["modifiers"] != "[]"),
+        "tables": len(tables),
+    }
 
-        with_photo = sum(1 for i in items if i["image_url"])
-        with_mods = sum(1 for i in items if i["modifiers"] != "[]")
+
+async def main() -> None:
+    conn = await db.connect()
+    try:
+        summary = await sync(conn)
         print(
-            f"Меню: {len(items)} позиций (с фото из iiko: {with_photo}, с модификаторами: {with_mods}), "
-            f"столов: {len(tables)}"
+            f"Меню: {summary['items']} позиций (с фото из iiko: {summary['with_photo']}, "
+            f"с модификаторами: {summary['with_modifiers']}), столов: {summary['tables']}"
         )
         async with conn.execute("SELECT name, token FROM tables ORDER BY id") as cur:
             async for row in cur:

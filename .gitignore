@@ -13,3 +13,5 @@ wheels/
 dumps/
 app.db*
 qr/
+.env.production*
+data/

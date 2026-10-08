@@ -2,7 +2,9 @@ from pathlib import Path
 
 import aiosqlite
 
-DB_PATH = Path("app.db")
+from config import setting
+
+DB_PATH = Path(setting.DB_PATH)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tables (
@@ -16,7 +18,8 @@ CREATE TABLE IF NOT EXISTS menu_items (
     name TEXT NOT NULL,
     price REAL NOT NULL,
     category TEXT NOT NULL,
-    is_available INTEGER NOT NULL DEFAULT 1,
+    is_available INTEGER NOT NULL DEFAULT 1,  -- стоп-лист бариста
+    in_menu INTEGER NOT NULL DEFAULT 1,  -- 0, если позицию убрали из меню iiko
     sort INTEGER NOT NULL DEFAULT 0,
     iiko_product_id TEXT UNIQUE,
     sku TEXT,
@@ -32,7 +35,7 @@ CREATE TABLE IF NOT EXISTS orders (
     comment TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    iiko_status TEXT NOT NULL DEFAULT 'off',
+    iiko_status TEXT NOT NULL DEFAULT 'off',  -- off / sending / sent / error / manual (бариста пробил сам)
     iiko_order_id TEXT,
     iiko_number INTEGER,  -- номер заказа в iikoFront, по нему кассир находит заказ
     iiko_error TEXT
@@ -59,6 +62,7 @@ MIGRATIONS = {
         "description": "TEXT NOT NULL DEFAULT ''",
         "image_url": "TEXT",
         "modifiers": "TEXT NOT NULL DEFAULT '[]'",
+        "in_menu": "INTEGER NOT NULL DEFAULT 1",
     },
     "orders": {
         "iiko_number": "INTEGER",

@@ -1,0 +1,19 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/app.db
+    volumes:
+      - ./data:/app/data # база SQLite
+      - ./data/menu:/app/static/menu # свои фото блюд: <артикул>.jpg
+    ports:
+      # Только localhost: снаружи приложение доступно лишь через nginx.
+      # Важно: Docker публикует порты в обход ufw, поэтому без 127.0.0.1 порт открылся бы в интернет.
+      - "127.0.0.1:8000:8000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
