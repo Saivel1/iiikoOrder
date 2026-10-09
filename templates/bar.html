@@ -10,8 +10,8 @@
 <style>
   :root { --primary: #ec1c24; --text: #212121; --muted: #7a7a7a; --bg: #ececec; --card: #ffffff; --line: #e8e8e8; --ok: #1f9d55; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html { overflow-x: clip; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.35 Montserrat, -apple-system, BlinkMacSystemFont, sans-serif; }
+  html { overflow-x: clip; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  body { max-width: 100%; overflow-wrap: anywhere; margin: 0; background: var(--bg); color: var(--text); font: 16px/1.35 Montserrat, -apple-system, BlinkMacSystemFont, sans-serif; }
   button { font-family: inherit; }
   .hidden { display: none !important; }
   header { position: sticky; top: 0; z-index: 5; background: var(--card); box-shadow: 0 1px 0 var(--line); }
@@ -52,11 +52,12 @@
   .item { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
   .item:last-child { border-bottom: 0; }
   .item .name { flex: 1; min-width: 0; cursor: pointer; }
-  .item .price { color: var(--muted); font-size: 14px; white-space: nowrap; }
+  .item .price { display: block; color: var(--muted); font-size: 13px; }
   .item.off .name { color: var(--muted); }
   .item.off .state { display: inline; }
   /* остаток: пусто — без ограничения */
-  .stock { width: 64px; flex: none; font: inherit; font-size: 15px; text-align: center; padding: 6px 4px; border-radius: 10px; border: 2px solid transparent; background: var(--bg); outline: none; }
+  /* 16px — иначе iPhone увеличивает страницу при нажатии на поле */
+  .stock { width: 64px; flex: none; font: inherit; font-size: 16px; text-align: center; padding: 6px 4px; border-radius: 10px; border: 2px solid transparent; background: var(--bg); outline: none; }
   .stock { appearance: textfield; -moz-appearance: textfield; }
   .stock::-webkit-inner-spin-button, .stock::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   .stock:focus { border-color: var(--primary); background: var(--card); }
@@ -207,8 +208,8 @@ function row(m) {
   const stock = el("input", { className: "stock", type: "number", inputMode: "numeric", min: 0, max: 9999, placeholder: "∞",
     value: m.stock ?? "", ariaLabel: "Сколько осталось" });
   const node = el("div", { className: "item" },
-    el("span", { className: "name", onclick: () => box.click() }, m.name, state),
-    el("span", { className: "price", textContent: rub(m.price) }),
+    el("span", { className: "name", onclick: () => box.click() }, m.name, state,
+      el("span", { className: "price", textContent: rub(m.price) })),
     stock,
     el("label", { className: "switch" }, box, el("span")),
   );

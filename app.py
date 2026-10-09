@@ -209,8 +209,13 @@ async def create_order(body: OrderIn):
             list(wanted),
         ) as cur:
             available = {r["id"]: r async for r in cur}
-        if any(i not in available for i in wanted):
-            raise HTTPException(409, "Часть позиций закончилась, обновите меню")
+        gone = [i for i in wanted if i not in available]
+        if gone:
+            async with conn.execute(
+                f"SELECT name FROM menu_items WHERE id IN ({','.join('?' * len(gone))})", gone
+            ) as cur:
+                names = [f"«{r['name']}»" async for r in cur]
+            raise HTTPException(409, f"Закончилось: {', '.join(names)}" if names else "Часть позиций закончилась")
         for item_id, qty in wanted.items():
             item = available[item_id]
             if item["stock"] is not None and qty > item["stock"]:

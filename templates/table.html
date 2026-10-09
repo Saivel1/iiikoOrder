@@ -18,9 +18,10 @@
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   /* Страховка: ничто не может сделать страницу шире экрана (clip, в отличие от hidden, не ломает sticky) */
-  html { overflow-x: clip; }
+  html { overflow-x: clip; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  /* Всё в ширину экрана: длинное слово переносится, а не раздвигает страницу */
   body {
-    margin: 0; background: var(--bg); color: var(--text);
+    margin: 0; background: var(--bg); color: var(--text); max-width: 100%; overflow-wrap: anywhere;
     font: 15px/1.35 Montserrat, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     padding-bottom: 100px;
   }
@@ -51,7 +52,8 @@
   .name-screen h2 { font-size: 22px; margin: 8px 0 6px; font-weight: 800; }
   .name-screen p { color: var(--muted); margin: 0 0 20px; }
   input, textarea {
-    width: 100%; font: inherit; color: var(--text); background: var(--bg);
+    /* 16px — иначе iPhone при нажатии на поле увеличивает страницу, и она уезжает за края экрана */
+    width: 100%; font: inherit; font-size: 16px; color: var(--text); background: var(--bg);
     border: 2px solid transparent; border-radius: 14px; padding: 14px; outline: none;
   }
   input:focus, textarea:focus { border-color: var(--primary); background: var(--card); }
@@ -169,7 +171,7 @@
   .toast {
     position: fixed; left: 50%; top: 16px; transform: translateX(-50%); z-index: 20;
     background: var(--ok); color: #fff; padding: 12px 20px; border-radius: 999px; font-weight: 700;
-    box-shadow: 0 8px 24px rgb(0 0 0 / .2);
+    box-shadow: 0 8px 24px rgb(0 0 0 / .2); width: max-content; max-width: calc(100% - 32px); text-align: center;
   }
   .loading { color: var(--muted); padding: 40px 0; text-align: center; }
   .line .mods { color: var(--muted); font-size: 12px; }
@@ -212,7 +214,18 @@
     position: sticky; bottom: 0; background: var(--card); display: flex; gap: 12px; align-items: center;
     margin-top: 16px; padding: 12px 0 calc(16px + env(safe-area-inset-bottom));
   }
-  .cfg-foot .btn { margin-top: 0; flex: 1; }
+  .cfg-foot .btn { margin-top: 0; flex: 1; min-width: 0; }
+  .card .left { color: var(--primary); font-size: 12px; font-weight: 700; }
+
+  /* ---------- оповещение: что-то закончилось ---------- */
+  .notice-bg { position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .45); display: grid; place-items: center; padding: 16px; }
+  .notice { background: var(--card); border-radius: 20px; padding: 22px 20px; width: 100%; max-width: 400px; text-align: center; }
+  .notice .big { font-size: 40px; }
+  .notice h2 { margin: 6px 0 10px; font-size: 20px; font-weight: 800; }
+  .notice ul { list-style: none; margin: 0; padding: 0; text-align: left; }
+  .notice li { background: var(--bg); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; font-size: 14px; }
+  .notice li b { display: block; }
+  .notice p { color: var(--muted); font-size: 14px; margin: 6px 0 0; }
 </style>
 </head>
 <body>
@@ -267,6 +280,16 @@
     <button class="btn" id="send">Отправить заказ</button>
     <p class="note">Оплата на кассе</p>
     <div class="error" id="send-error"></div>
+  </div>
+</div>
+
+<div class="notice-bg hidden" id="notice">
+  <div class="notice" role="alertdialog" aria-modal="true" aria-labelledby="notice-title">
+    <div class="big">😔</div>
+    <h2 id="notice-title"></h2>
+    <ul id="notice-list"></ul>
+    <p id="notice-text"></p>
+    <button class="btn" id="notice-ok">Понятно</button>
   </div>
 </div>
 
@@ -386,6 +409,8 @@ const byId = (id) => menu.find((m) => m.id === id);
 const lineKey = (id, mods) => id + "|" + mods.map((x) => x.id + ":" + x.amount).sort().join(",");
 const itemCount = (id) => [...cart.values()].reduce((s, l) => s + (l.id === id ? l.qty : 0), 0);
 const MAX_QTY = 10; // как OrderItemIn.qty на сервере
+const LOW_STOCK = 5; // с какого остатка показывать гостю «Осталось N шт.»
+const MENU_REFRESH_SECONDS = 30;
 // Сколько ещё можно положить в строку: не больше 10 и не больше остатка позиции минус другие строки с ней
 function lineLimit(id, lineQty = 0) {
   const stock = byId(id)?.stock;
@@ -405,24 +430,68 @@ function modsText(item, mods) {
   }).filter(Boolean).join(", ");
 }
 
+let menuJson = "";
+// Перечитывает меню и подгоняет под него корзину. Возвращает, что пришлось поменять, — гостю это показываем
 async function loadMenu() {
+  let fresh;
   try {
     const res = await fetch("/api/menu");
-    menu = await res.json();
+    if (!res.ok) throw new Error();
+    fresh = await res.json();
   } catch {
-    $("menu").replaceChildren(el("div", { className: "loading", textContent: "Не удалось загрузить меню. Обновите страницу." }));
-    return;
+    if (!menu.length) $("menu").replaceChildren(el("div", { className: "loading", textContent: "Не удалось загрузить меню. Обновите страницу." }));
+    return [];
   }
-  // Выкидываем из корзины то, что пропало из меню (стоп-лист, обновление модификаторов), и урезаем до остатка
+  const oldNames = new Map(menu.map((m) => [m.id, m.name]));
+  const before = new Map();
+  for (const l of cart.values()) before.set(l.id, (before.get(l.id) || 0) + l.qty);
+  const changed = JSON.stringify(fresh) !== menuJson;
+  menuJson = JSON.stringify(fresh);
+  menu = fresh;
+
+  const notes = [];
+  const rebuild = new Set();
   for (const [key, l] of cart) {
     const item = byId(l.id);
-    if (!item || l.mods.some((x) => !modInfo(item, x.id))) { cart.delete(key); continue; }
+    const title = item?.name || l.name || oldNames.get(l.id) || "Позиция";
+    if (!item) {
+      cart.delete(key);
+      if (!rebuild.has(l.id)) notes.push({ title, text: "Закончилась — убрали из корзины" });
+      rebuild.add(l.id);
+    } else if (l.mods.some((x) => !modInfo(item, x.id))) {
+      cart.delete(key);
+      notes.push({ title, text: "Часть добавок закончилась — соберите заново" });
+    }
+  }
+  // Остаток меньше, чем в корзине, — урезаем
+  for (const [key, l] of cart) {
     l.qty = Math.min(l.qty, lineLimit(l.id, l.qty));
     if (l.qty <= 0) cart.delete(key);
   }
+  for (const [id, had] of before) {
+    const item = byId(id);
+    const now = itemCount(id);
+    if (item && now < had) notes.push({ title: item.name, text: `Осталось только ${item.stock} шт. — в корзине теперь ${now}` });
+  }
+
   saveCart();
-  renderMenu();
+  if (changed) renderMenu(); else before.forEach((_, id) => updateCard(id));
   renderCart();
+  return notes;
+}
+
+function showNotice(title, notes, text = "") {
+  $("notice-title").textContent = title;
+  $("notice-list").replaceChildren(...notes.map((n) => el("li", {}, el("b", { textContent: n.title }), n.text)));
+  $("notice-text").textContent = text;
+  $("notice").classList.remove("hidden");
+  $("notice-ok").focus();
+}
+$("notice-ok").onclick = () => $("notice").classList.add("hidden");
+
+async function refreshMenu() {
+  const notes = await loadMenu();
+  if (notes.length) showNotice("Корзина изменилась", notes, "Пока вы выбирали, часть позиций закончилась.");
 }
 
 function stepper(qty, onChange) {
@@ -452,6 +521,7 @@ function card(m) {
     el("div", { className: "body" },
       el("div", { className: "title", textContent: m.name }),
       m.description ? el("div", { className: "desc", textContent: m.description }) : "",
+      m.stock != null && m.stock <= LOW_STOCK ? el("div", { className: "left", textContent: `Осталось ${m.stock} шт.` }) : "",
       el("div", { className: "foot" },
         el("span", { className: "price", textContent: (m.modifiers.some((g) => g.min > 0) ? "от " : "") + rub(m.price) }),
         controls(m)),
@@ -562,7 +632,7 @@ function addLine(id, mods, qty) {
   const limit = lineLimit(id, have);
   if (have + qty > limit) stockToast(id);
   if (limit <= have) return false;
-  cart.set(key, { id, mods, qty: Math.min(limit, have + qty) });
+  cart.set(key, { id, name: byId(id)?.name, mods, qty: Math.min(limit, have + qty) });
   saveCart();
   updateCard(id);
   renderCart();
@@ -722,8 +792,16 @@ $("send").onclick = async () => {
     });
     const data = await res.json();
     if (!res.ok) {
-      $("send-error").textContent = typeof data.detail === "string" ? data.detail : "Не получилось отправить, попробуйте ещё раз";
-      if (res.status === 409) loadMenu();
+      const detail = typeof data.detail === "string" ? data.detail : "Не получилось отправить, попробуйте ещё раз";
+      if (res.status === 409) {
+        // Позиция закончилась, пока гость выбирал: явно говорим, что именно и что заказ не ушёл
+        const notes = await loadMenu();
+        showNotice("Заказ не отправлен", notes.length ? notes : [{ title: "Меню изменилось", text: detail }],
+          cart.size ? "Проверьте корзину и отправьте заказ ещё раз." : "Выберите что-нибудь другое из меню.");
+        if (cart.size) openCart();
+      } else {
+        $("send-error").textContent = detail;
+      }
       return;
     }
     myOrders = [data.id, ...myOrders].slice(0, 10);
@@ -823,7 +901,8 @@ $("receipt-bg").onclick = closeReceipt;
 
 // ---------- старт ----------
 if (name) showMenu(); else showName();
-loadMenu();
+refreshMenu();
+setInterval(refreshMenu, MENU_REFRESH_SECONDS * 1000);
 pollOrders();
 setInterval(pollOrders, 5000);
 </script>
