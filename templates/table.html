@@ -80,6 +80,8 @@
   .order .num { text-align: center; flex: none; max-width: 35%; }
   .order .num b { display: block; font-size: 22px; font-weight: 800; color: var(--primary); line-height: 1.1; }
   .order .num small { color: var(--muted); font-size: 11px; white-space: pre-line; display: block; }
+  .order { cursor: pointer; }
+  .order .more { color: var(--primary); font-size: 12px; font-weight: 700; }
 
   /* ---------- поиск и категории ---------- */
   .menubar { position: sticky; top: 0; z-index: 5; background: var(--bg); margin: 0 -16px; padding: 12px 16px 0; }
@@ -172,6 +174,15 @@
   .loading { color: var(--muted); padding: 40px 0; text-align: center; }
   .line .mods { color: var(--muted); font-size: 12px; }
 
+  /* ---------- чек отправленного заказа ---------- */
+  .receipt-bg { z-index: 14; }
+  .receipt { z-index: 15; }
+  .receipt .state { font-weight: 700; margin-bottom: 4px; }
+  .receipt .line { align-items: flex-start; }
+  .receipt .line .qty { color: var(--muted); font-weight: 700; font-size: 14px; flex: none; min-width: 28px; }
+  .receipt .line .sum { color: var(--text); font-weight: 700; font-size: 14px; white-space: nowrap; flex: none; }
+  .receipt .comment { background: var(--bg); border-radius: 12px; padding: 10px 12px; font-size: 14px; overflow-wrap: anywhere; }
+
   /* ---------- выбор модификаторов ---------- */
   .cfg-bg { z-index: 12; }
   .cfg { z-index: 13; padding-bottom: 0; }
@@ -256,6 +267,19 @@
     <button class="btn" id="send">Отправить заказ</button>
     <p class="note">Оплата на кассе</p>
     <div class="error" id="send-error"></div>
+  </div>
+</div>
+
+<div class="sheet-bg receipt-bg hidden" id="receipt-bg"></div>
+<div class="sheet receipt hidden" id="receipt">
+  <div class="inner">
+    <h2><span id="receipt-title"></span> <button class="close" id="receipt-close" aria-label="Закрыть">×</button></h2>
+    <div class="who" id="receipt-who"></div>
+    <div class="state" id="receipt-state"></div>
+    <div id="receipt-lines"></div>
+    <div class="total"><span>Итого</span><span id="receipt-total"></span></div>
+    <div id="receipt-comment"></div>
+    <p class="note">Оплата на кассе</p>
   </div>
 </div>
 
@@ -361,6 +385,12 @@ $("guest-chip").onclick = showName;
 const byId = (id) => menu.find((m) => m.id === id);
 const lineKey = (id, mods) => id + "|" + mods.map((x) => x.id + ":" + x.amount).sort().join(",");
 const itemCount = (id) => [...cart.values()].reduce((s, l) => s + (l.id === id ? l.qty : 0), 0);
+const MAX_QTY = 10; // как OrderItemIn.qty на сервере
+// Сколько ещё можно положить в строку: не больше 10 и не больше остатка позиции минус другие строки с ней
+function lineLimit(id, lineQty = 0) {
+  const stock = byId(id)?.stock;
+  return stock == null ? MAX_QTY : Math.min(MAX_QTY, stock - itemCount(id) + lineQty);
+}
 
 function modInfo(item, modId) {
   for (const g of item.modifiers) for (const x of g.items) if (x.id === modId) return x;
@@ -383,10 +413,12 @@ async function loadMenu() {
     $("menu").replaceChildren(el("div", { className: "loading", textContent: "Не удалось загрузить меню. Обновите страницу." }));
     return;
   }
-  // Выкидываем из корзины то, что пропало из меню (стоп-лист, обновление модификаторов)
+  // Выкидываем из корзины то, что пропало из меню (стоп-лист, обновление модификаторов), и урезаем до остатка
   for (const [key, l] of cart) {
     const item = byId(l.id);
-    if (!item || l.mods.some((x) => !modInfo(item, x.id))) cart.delete(key);
+    if (!item || l.mods.some((x) => !modInfo(item, x.id))) { cart.delete(key); continue; }
+    l.qty = Math.min(l.qty, lineLimit(l.id, l.qty));
+    if (l.qty <= 0) cart.delete(key);
   }
   saveCart();
   renderMenu();
@@ -519,18 +551,28 @@ function watchCategories() {
   document.querySelectorAll("section h3").forEach((h) => observer.observe(h));
 }
 
+function stockToast(id) {
+  const stock = byId(id)?.stock;
+  if (stock != null && stock < MAX_QTY) toast(`Осталось только ${stock} шт.`);
+}
 function addLine(id, mods, qty) {
   const key = lineKey(id, mods);
   const line = cart.get(key);
-  cart.set(key, { id, mods, qty: Math.min(10, (line?.qty || 0) + qty) });
+  const have = line?.qty || 0;
+  const limit = lineLimit(id, have);
+  if (have + qty > limit) stockToast(id);
+  if (limit <= have) return false;
+  cart.set(key, { id, mods, qty: Math.min(limit, have + qty) });
   saveCart();
   updateCard(id);
   renderCart();
+  return true;
 }
 function setLineQty(key, qty) {
   const line = cart.get(key);
   if (!line) return;
-  qty = Math.min(10, qty);
+  const limit = lineLimit(line.id, line.qty);
+  if (qty > limit) { stockToast(line.id); qty = limit; }
   if (qty > 0) line.qty = qty; else cart.delete(key);
   saveCart();
   updateCard(line.id);
@@ -613,12 +655,17 @@ function renderConfig() {
       ...g.items.map((x) => option(g, x)),
     )));
   const mods = [...cfg.amounts].map(([id, amount]) => ({ id, amount }));
-  $("cfg-qty").replaceWith(Object.assign(stepper(cfg.qty, (q) => { cfg.qty = Math.max(1, Math.min(10, q)); renderConfig(); }), { id: "cfg-qty" }));
+  $("cfg-qty").replaceWith(Object.assign(stepper(cfg.qty, (q) => {
+    const limit = Math.max(1, lineLimit(item.id));
+    if (q > limit) stockToast(item.id);
+    cfg.qty = Math.max(1, Math.min(limit, q));
+    renderConfig();
+  }), { id: "cfg-qty" }));
   const btn = $("cfg-add");
   btn.disabled = missing.length > 0;
   btn.textContent = missing.length ? "Выберите: " + missing[0].name.toLowerCase() : "Добавить · " + rub(unitPrice(item, mods) * cfg.qty);
   btn.onclick = () => {
-    addLine(item.id, mods, cfg.qty);
+    if (!addLine(item.id, mods, cfg.qty)) return;
     closeConfig();
     toast("Добавлено в корзину");
   };
@@ -720,18 +767,59 @@ async function pollOrders() {
 function renderOrders() {
   const since = Date.now() - SHOW_ORDERS_HOURS * 3600e3;
   const recent = myOrders.map((id) => orderData[id]).filter((o) => o && new Date(o.created_at) > since);
-  $("orders").replaceChildren(...recent.map((o) => el("div", { className: "order " + o.iiko_status },
+  if (receiptId) renderReceipt(); // статус меняется, пока чек открыт
+  $("orders").replaceChildren(...recent.map((o) => el("div", { className: "order " + o.iiko_status, role: "button", tabIndex: 0,
+    onclick: () => openReceipt(o.id), onkeydown: (e) => { if (e.key === "Enter") openReceipt(o.id); } },
     el("span", { className: "dot" }),
     el("div", { className: "what" },
       el("div", { className: "status", textContent: STATUS[o.iiko_status] || "Принят" }),
       el("div", { className: "lines", textContent: o.items.map((i) =>
-        (i.qty > 1 ? i.qty + " × " : "") + i.name + (i.modifiers.length ? " (" + i.modifiers.map((m) => m.name).join(", ") + ")" : "")).join(", ") })),
+        (i.qty > 1 ? i.qty + " × " : "") + i.name + (i.modifiers.length ? " (" + i.modifiers.map((m) => m.name).join(", ") + ")" : "")).join(", ") }),
+      el("div", { className: "more", textContent: "Состав и сумма ›" })),
     // Номер из iikoFront — гость называет его на кассе
     o.iiko_number
       ? el("div", { className: "num" }, el("b", { textContent: "№" + o.iiko_number }), el("small", { textContent: "назовите на кассе" }))
       : el("div", { className: "num" }, el("small", { textContent: o.iiko_status === "sending" ? "номер\nприсваивается…" : "назовите имя\nна кассе" })),
   )));
 }
+
+// ---------- чек: состав отправленного заказа ----------
+let receiptId = null;
+// Цены — снимок на момент заказа с сервера, а не текущее меню
+const orderLineSum = (i) => (i.price + i.modifiers.reduce((s, m) => s + m.price * m.amount, 0)) * i.qty;
+
+function renderReceipt() {
+  const o = orderData[receiptId];
+  if (!o) return;
+  $("receipt-title").textContent = o.iiko_number ? "Заказ №" + o.iiko_number : "Ваш заказ";
+  $("receipt-who").textContent = `${TABLE} · ${o.guest_name} · ` +
+    new Date(o.created_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  $("receipt-state").textContent = STATUS[o.iiko_status] || "Принят";
+  $("receipt-lines").replaceChildren(...o.items.map((i) => el("div", { className: "line" },
+    el("span", { className: "qty", textContent: i.qty + "×" }),
+    el("div", { className: "info" },
+      el("div", { className: "name", textContent: i.name }),
+      ...i.modifiers.map((m) => el("div", { className: "mods",
+        textContent: "+ " + m.name + (m.amount > 1 ? " ×" + m.amount : "") + (m.price ? " · " + rub(m.price * m.amount) : "") }))),
+    el("span", { className: "sum", textContent: rub(orderLineSum(i)) }),
+  )));
+  $("receipt-total").textContent = rub(o.items.reduce((s, i) => s + orderLineSum(i), 0));
+  $("receipt-comment").replaceChildren(...(o.comment ? [el("div", { className: "comment", textContent: "Пожелания: " + o.comment })] : []));
+}
+function openReceipt(id) {
+  receiptId = id;
+  renderReceipt();
+  $("receipt").classList.remove("hidden");
+  $("receipt-bg").classList.remove("hidden");
+  $("receipt").scrollTop = 0;
+}
+function closeReceipt() {
+  receiptId = null;
+  $("receipt").classList.add("hidden");
+  $("receipt-bg").classList.add("hidden");
+}
+$("receipt-close").onclick = closeReceipt;
+$("receipt-bg").onclick = closeReceipt;
 
 // ---------- старт ----------
 if (name) showMenu(); else showName();

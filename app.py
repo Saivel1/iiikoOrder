@@ -39,6 +39,10 @@ PHOTO_EXTS = (".webp", ".jpg", ".jpeg", ".png")
 conn: aiosqlite.Connection
 last_order_at: dict[tuple[int, str], float] = {}
 background_tasks: set[asyncio.Task] = set()
+# Проверка остатков и их списание — без await-разрывов между двумя заказами на одну позицию
+order_lock = asyncio.Lock()
+# Синхронизация по расписанию и по кнопке бариста не должны идти одновременно
+sync_lock = asyncio.Lock()
 templates = Jinja2Templates(directory="templates")
 
 
@@ -57,7 +61,8 @@ async def menu_sync_loop() -> None:
     """Подтягивает меню, фото, модификаторы и столы из iiko — сразу при старте и потом по расписанию."""
     while True:
         try:
-            summary = await import_menu.sync(conn)
+            async with sync_lock:
+                summary = await import_menu.sync(conn)
             log.info("Меню синхронизировано с iiko: %s", summary)
         except Exception:  # iiko недоступен — работаем на том, что уже есть в базе
             log.exception("Не удалось синхронизировать меню с iiko")
@@ -119,8 +124,9 @@ def local_photos() -> dict[str, str]:
 async def menu():
     photos = local_photos()
     async with conn.execute(
-        """SELECT id, name, price, category, description, sku, image_url, modifiers
-           FROM menu_items WHERE is_available = 1 AND in_menu = 1 ORDER BY sort"""
+        """SELECT id, name, price, category, description, sku, image_url, modifiers, stock
+           FROM menu_items WHERE is_available = 1 AND in_menu = 1 AND (stock IS NULL OR stock > 0)
+           ORDER BY sort"""
     ) as cur:
         rows = [dict(r) async for r in cur]
     for r in rows:
@@ -190,38 +196,50 @@ async def create_order(body: OrderIn):
     if time.monotonic() - last_order_at.get(key, 0) < RATE_LIMIT_SECONDS:
         raise HTTPException(429, "Подождите пару секунд перед следующим заказом")
 
-    ids = [i.menu_item_id for i in body.items]
-    placeholders = ",".join("?" * len(ids))
-    async with conn.execute(
-        f"""SELECT id, name, price, modifiers FROM menu_items
-            WHERE is_available = 1 AND in_menu = 1 AND id IN ({placeholders})""",
-        ids,
-    ) as cur:
-        available = {r["id"]: r async for r in cur}
-    missing = [i for i in ids if i not in available]
-    if missing:
-        raise HTTPException(409, "Часть позиций закончилась, обновите меню")
-
-    lines = []
+    # Одна позиция может быть в корзине несколькими строками (с разными добавками)
+    wanted: dict[int, int] = {}
     for i in body.items:
-        item = available[i.menu_item_id]
-        mods = check_modifiers(item["name"], json.loads(item["modifiers"]), i.modifiers)
-        lines.append((i.menu_item_id, i.qty, item["price"], item["name"], json.dumps(mods, ensure_ascii=False)))
+        wanted[i.menu_item_id] = wanted.get(i.menu_item_id, 0) + i.qty
+    placeholders = ",".join("?" * len(wanted))
 
-    ts = now()
-    iiko_status = "sending" if setting.IIKO_SEND_ORDERS else "off"
-    cur = await conn.execute(
-        """INSERT INTO orders (table_id, guest_name, comment, created_at, updated_at, iiko_status)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (table["id"], guest_name, body.comment.strip(), ts, ts, iiko_status),
-    )
-    order_id = cur.lastrowid
-    await conn.executemany(
-        """INSERT INTO order_items (order_id, menu_item_id, qty, price_snapshot, name_snapshot, modifiers)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        [(order_id, *line) for line in lines],
-    )
-    await conn.commit()
+    async with order_lock:
+        async with conn.execute(
+            f"""SELECT id, name, price, modifiers, stock FROM menu_items
+                WHERE is_available = 1 AND in_menu = 1 AND (stock IS NULL OR stock > 0) AND id IN ({placeholders})""",
+            list(wanted),
+        ) as cur:
+            available = {r["id"]: r async for r in cur}
+        if any(i not in available for i in wanted):
+            raise HTTPException(409, "Часть позиций закончилась, обновите меню")
+        for item_id, qty in wanted.items():
+            item = available[item_id]
+            if item["stock"] is not None and qty > item["stock"]:
+                raise HTTPException(409, f"«{item['name']}»: осталось только {item['stock']} шт.")
+
+        lines = []
+        for i in body.items:
+            item = available[i.menu_item_id]
+            mods = check_modifiers(item["name"], json.loads(item["modifiers"]), i.modifiers)
+            lines.append((i.menu_item_id, i.qty, item["price"], item["name"], json.dumps(mods, ensure_ascii=False)))
+
+        ts = now()
+        iiko_status = "sending" if setting.IIKO_SEND_ORDERS else "off"
+        cur = await conn.execute(
+            """INSERT INTO orders (table_id, guest_name, comment, created_at, updated_at, iiko_status)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (table["id"], guest_name, body.comment.strip(), ts, ts, iiko_status),
+        )
+        order_id = cur.lastrowid
+        await conn.executemany(
+            """INSERT INTO order_items (order_id, menu_item_id, qty, price_snapshot, name_snapshot, modifiers)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [(order_id, *line) for line in lines],
+        )
+        await conn.executemany(
+            "UPDATE menu_items SET stock = stock - ? WHERE id = ? AND stock IS NOT NULL",
+            [(qty, item_id) for item_id, qty in wanted.items()],
+        )
+        await conn.commit()
     last_order_at[key] = time.monotonic()
 
     if setting.IIKO_SEND_ORDERS:
@@ -319,22 +337,46 @@ async def bar_page(request: Request, key: str):
 @app.get("/api/bar/menu", dependencies=[Depends(bar_auth)])
 async def bar_menu():
     async with conn.execute(
-        "SELECT id, name, price, category, is_available FROM menu_items WHERE in_menu = 1 ORDER BY sort"
+        "SELECT id, name, price, category, is_available, stock FROM menu_items WHERE in_menu = 1 ORDER BY sort"
     ) as cur:
         return [dict(r) async for r in cur]
 
 
-class AvailabilityIn(BaseModel):
-    is_available: bool
+class MenuItemPatch(BaseModel):
+    is_available: bool | None = None
+    stock: int | None = Field(default=None, ge=0, le=9999)  # null — без ограничения
 
 
 @app.patch("/api/bar/menu/{item_id}", dependencies=[Depends(bar_auth)])
-async def set_availability(item_id: int, body: AvailabilityIn):
-    cur = await conn.execute("UPDATE menu_items SET is_available = ? WHERE id = ?", (int(body.is_available), item_id))
-    await conn.commit()
+async def update_menu_item(item_id: int, body: MenuItemPatch):
+    # Меняем только присланные поля: {"stock": null} снимает ограничение, а не пропускается
+    fields = body.model_dump(include=body.model_fields_set & {"is_available", "stock"})
+    if "is_available" in fields and fields["is_available"] is None:
+        raise HTTPException(422, "is_available не может быть пустым")
+    if not fields:
+        raise HTTPException(422, "Нечего менять")
+    async with order_lock:
+        cur = await conn.execute(
+            f"UPDATE menu_items SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+            (*fields.values(), item_id),
+        )
+        await conn.commit()
     if not cur.rowcount:
         raise HTTPException(404, "Позиция не найдена")
-    return {"id": item_id, "is_available": body.is_available}
+    return {"id": item_id, **fields}
+
+
+@app.post("/api/bar/sync", dependencies=[Depends(bar_auth)])
+async def sync_menu():
+    """Подтянуть меню из iiko прямо сейчас, не дожидаясь расписания."""
+    try:
+        async with sync_lock:
+            summary = await import_menu.sync(conn)
+    except Exception as e:
+        log.exception("Не удалось синхронизировать меню с iiko по кнопке")
+        raise HTTPException(502, f"iiko не ответил: {str(e)[:200]}")
+    log.info("Меню синхронизировано с iiko по кнопке: %s", summary)
+    return summary
 
 
 # Касса онлайн для облака iiko? Спрашиваем не чаще раза в KASSA_CHECK_SECONDS, сколько бы вкладок ни было открыто

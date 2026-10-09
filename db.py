@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS menu_items (
     price REAL NOT NULL,
     category TEXT NOT NULL,
     is_available INTEGER NOT NULL DEFAULT 1,  -- стоп-лист бариста
+    stock INTEGER,  -- сколько осталось, заказы его уменьшают; NULL — без ограничения
     in_menu INTEGER NOT NULL DEFAULT 1,  -- 0, если позицию убрали из меню iiko
     sort INTEGER NOT NULL DEFAULT 0,
     iiko_product_id TEXT UNIQUE,
@@ -63,6 +64,7 @@ MIGRATIONS = {
         "image_url": "TEXT",
         "modifiers": "TEXT NOT NULL DEFAULT '[]'",
         "in_menu": "INTEGER NOT NULL DEFAULT 1",
+        "stock": "INTEGER",
     },
     "orders": {
         "iiko_number": "INTEGER",

@@ -16,7 +16,7 @@
   .hidden { display: none !important; }
   header { position: sticky; top: 0; z-index: 5; background: var(--card); box-shadow: 0 1px 0 var(--line); }
   header .in { max-width: 720px; margin: 0 auto; padding: 14px 16px; }
-  .top { display: flex; align-items: center; gap: 12px; }
+  .top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
   h1 { margin: 0; font-size: 20px; font-weight: 800; flex: 1; }
   .kassa { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px; color: var(--muted); }
   .kassa::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #bdbdbd; }
@@ -24,6 +24,7 @@
   .kassa.on::before { background: var(--ok); }
   .kassa.off { color: var(--primary); }
   .kassa.off::before { background: var(--primary); }
+  .ghost:disabled { opacity: .6; cursor: default; }
   .ghost { border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 999px; padding: 8px 14px; font-size: 14px; font-weight: 600; cursor: pointer; }
   .sub { color: var(--muted); font-size: 13px; margin-top: 6px; }
   .search { margin-top: 10px; width: 100%; font: inherit; padding: 10px 14px; border-radius: 12px; border: 0; background: var(--bg); outline: none; }
@@ -48,16 +49,22 @@
 
   h3 { margin: 22px 0 8px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
   .list { background: var(--card); border-radius: 16px; overflow: hidden; }
-  label.item { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
-  label.item:last-child { border-bottom: 0; }
-  label.item .name { flex: 1; min-width: 0; }
-  label.item .price { color: var(--muted); font-size: 14px; }
-  label.item.off .name { color: var(--muted); }
-  label.item.off .state { display: inline; }
+  .item { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .item:last-child { border-bottom: 0; }
+  .item .name { flex: 1; min-width: 0; cursor: pointer; }
+  .item .price { color: var(--muted); font-size: 14px; white-space: nowrap; }
+  .item.off .name { color: var(--muted); }
+  .item.off .state { display: inline; }
+  /* остаток: пусто — без ограничения */
+  .stock { width: 64px; flex: none; font: inherit; font-size: 15px; text-align: center; padding: 6px 4px; border-radius: 10px; border: 2px solid transparent; background: var(--bg); outline: none; }
+  .stock { appearance: textfield; -moz-appearance: textfield; }
+  .stock::-webkit-inner-spin-button, .stock::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .stock:focus { border-color: var(--primary); background: var(--card); }
+  .stock.low { color: var(--primary); font-weight: 700; }
   .state { display: none; color: var(--primary); font-size: 12px; font-weight: 700; margin-left: 6px; }
 
   /* переключатель */
-  .switch { position: relative; width: 50px; height: 30px; flex: none; }
+  .switch { position: relative; width: 50px; height: 30px; flex: none; cursor: pointer; }
   .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
   .switch span { position: absolute; inset: 0; background: #c9c9c9; border-radius: 999px; transition: .15s; }
   .switch span::before { content: ""; position: absolute; width: 24px; height: 24px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .15s; box-shadow: 0 1px 3px rgb(0 0 0 / .25); }
@@ -85,9 +92,11 @@
     <div class="top">
       <h1>Бар</h1>
       <span class="kassa hidden" id="kassa"></span>
+      <button class="ghost" id="sync">Обновить меню</button>
       <button class="ghost" id="qr-open">QR-коды</button>
     </div>
     <div class="sub" id="sub">Выключите позицию — она сразу пропадёт у гостей.</div>
+    <div class="sub">Число у позиции — сколько осталось: заказы его уменьшают, на нуле позиция пропадает. Пусто — без ограничения.</div>
     <input class="search" id="search" type="search" placeholder="Найти позицию…">
   </div>
 </header>
@@ -178,25 +187,52 @@ async function loadOverview() {
 // ---------- стоп-лист ----------
 let items = [];
 
+const isOff = (m) => !m.is_available || m.stock === 0;
+const LOW_STOCK = 3;
+
+async function save(m, patch) {
+  Object.assign(m, patch);
+  renderSub();
+  try {
+    const res = await api(`/api/bar/menu/${m.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (res.ok) return;
+  } catch {}
+  alert("Не удалось сохранить, попробуйте ещё раз");
+  loadMenu();
+}
+
 function row(m) {
   const box = el("input", { type: "checkbox", checked: !!m.is_available });
-  const node = el("label", { className: "item" + (m.is_available ? "" : " off") },
-    el("span", { className: "name" }, m.name, el("span", { className: "state", textContent: "нет в наличии" })),
+  const state = el("span", { className: "state" });
+  const stock = el("input", { className: "stock", type: "number", inputMode: "numeric", min: 0, max: 9999, placeholder: "∞",
+    value: m.stock ?? "", ariaLabel: "Сколько осталось" });
+  const node = el("div", { className: "item" },
+    el("span", { className: "name", onclick: () => box.click() }, m.name, state),
     el("span", { className: "price", textContent: rub(m.price) }),
-    el("span", { className: "switch" }, box, el("span")),
+    stock,
+    el("label", { className: "switch" }, box, el("span")),
   );
-  box.onchange = async () => {
-    m.is_available = box.checked;
-    node.classList.toggle("off", !box.checked);
-    renderSub();
-    const res = await api(`/api/bar/menu/${m.id}`, { method: "PATCH", body: JSON.stringify({ is_available: box.checked }) });
-    if (!res.ok) { alert("Не удалось сохранить, попробуйте ещё раз"); loadMenu(); }
+  const paint = () => {
+    node.classList.toggle("off", isOff(m));
+    state.textContent = !m.is_available ? "нет в наличии" : "закончилось";
+    stock.classList.toggle("low", m.stock !== null && m.stock <= LOW_STOCK);
   };
+  paint();
+  box.onchange = () => { save(m, { is_available: box.checked }); paint(); };
+  stock.onchange = () => {
+    const v = stock.value.trim();
+    const n = v === "" ? null : Math.max(0, Math.min(9999, Math.floor(Number(v))));
+    if (Number.isNaN(n)) { stock.value = m.stock ?? ""; return; }
+    stock.value = n ?? "";
+    save(m, { stock: n });
+    paint();
+  };
+  stock.onkeydown = (e) => { if (e.key === "Enter") stock.blur(); };
   return node;
 }
 
 function renderSub() {
-  const off = items.filter((m) => !m.is_available).length;
+  const off = items.filter(isOff).length;
   $("sub").textContent = off
     ? `Стоп-лист: ${off} из ${items.length}. Выключенные позиции гости не видят.`
     : "Всё в наличии. Выключите позицию — она сразу пропадёт у гостей.";
@@ -228,6 +264,26 @@ async function loadMenu() {
 }
 $("search").oninput = render;
 
+// ---------- обновить меню из iiko ----------
+$("sync").onclick = async () => {
+  const btn = $("sync");
+  btn.disabled = true;
+  btn.textContent = "Обновляю…";
+  try {
+    const res = await api("/api/bar/sync", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Ошибка");
+    btn.textContent = `Готово: ${data.items} поз.`;
+    await loadMenu();
+  } catch (e) {
+    btn.textContent = "Обновить меню";
+    alert("Не удалось обновить меню: " + (e.message || "нет связи с сервером"));
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = "Обновить меню"; }, 3000);
+  }
+};
+
 // ---------- QR-коды по мастер-паролю ----------
 function closeQr() { $("qr-modal").classList.add("hidden"); $("qr-password").value = ""; $("qr-msg").textContent = ""; }
 $("qr-open").onclick = () => { $("qr-modal").classList.remove("hidden"); $("qr-password").focus(); };
@@ -258,7 +314,11 @@ $("qr-form").onsubmit = async (e) => {
 
 loadMenu();
 loadOverview();
-setInterval(loadOverview, 20000);
+setInterval(() => {
+  loadOverview();
+  // Остатки уменьшаются от заказов гостей; не перерисовываем, пока бариста вводит число
+  if (!document.activeElement?.classList.contains("stock")) loadMenu();
+}, 20000);
 </script>
 </body>
 </html>
