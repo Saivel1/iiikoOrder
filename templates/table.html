@@ -535,6 +535,7 @@ function setLineQty(key, qty) {
 
 // ---------- выбор модификаторов ----------
 let cfg = null; // { item, amounts: Map(modId -> amount), qty }
+const MAX_MOD_AMOUNT = 10; // как ModifierIn.amount на сервере
 
 function openConfig(item) {
   cfg = { item, amounts: new Map(), qty: 1 };
@@ -565,14 +566,16 @@ const groupTotal = (g) => g.items.reduce((s, x) => s + (cfg.amounts.get(x.id) ||
 function setAmount(g, x, amount) {
   if (g.max === 1 && amount > 0) g.items.forEach((y) => cfg.amounts.delete(y.id)); // как радиокнопка
   const others = groupTotal(g) - (cfg.amounts.get(x.id) || 0);
-  amount = Math.max(0, Math.min(amount, x.max, g.max - others));
+  // Сервер принимает не больше MAX_MOD_AMOUNT одной добавки, даже если в iiko группе разрешено больше
+  amount = Math.max(0, Math.min(amount, x.max, g.max - others, MAX_MOD_AMOUNT));
   if (amount) cfg.amounts.set(x.id, amount); else cfg.amounts.delete(x.id);
   renderConfig();
 }
 
 function groupHint(g) {
   if (g.min > 0) return g.max === 1 ? "обязательно, 1 вариант" : `обязательно, от ${g.min} до ${g.max}`;
-  return g.max === 1 ? "по желанию, только 1" : `по желанию, до ${g.max}`;
+  if (g.max === 1) return "по желанию, только 1";
+  return g.max > MAX_MOD_AMOUNT ? "по желанию, можно несколько" : `по желанию, до ${g.max}`;
 }
 
 function option(g, x) {

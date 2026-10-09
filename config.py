@@ -2,7 +2,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env")
+    # Лишние строки в .env не роняют приложение — просто игнорируются
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     TOKEN: str
     IIKO_APP_ID: str | None = None
